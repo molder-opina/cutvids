@@ -21,20 +21,51 @@ def get_duration(file_path):
     return float(result.stdout.strip())
 
 
-def transcribe(input_file, output_dir):
+def format_time_srt(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:06.3f}".replace(".", ",")
+
+
+def transcribe(input_file, output_dir, model_name="large-v3-turbo"):
     os.makedirs(output_dir, exist_ok=True)
-    model = "small"
-    lang = "es"
 
-    cmd = f'whisper "{input_file}" --language {lang} --output_format srt --output_dir "{output_dir}" --model {model}'
-    print(f"Transcribing: {cmd}")
-    run_cmd(cmd)
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        print("faster-whisper not installed. Installing...")
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "faster-whisper"], check=True
+        )
+        from faster_whisper import WhisperModel
 
-    srt_files = glob.glob(f"{output_dir}/*.srt")
-    if not srt_files:
-        print("No SRT file generated", file=sys.stderr)
-        sys.exit(1)
-    return srt_files[0]
+    print(f"Loading model: {model_name}")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    print("Model loaded")
+
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+    output_srt = os.path.join(output_dir, f"{base_name}.srt")
+
+    print(f"Transcribing: {input_file}")
+    segments, info = model.transcribe(input_file, language="es")
+
+    print(f"Language: {info.language} (probability: {info.language_probability:.2f})")
+
+    count = 0
+    with open(output_srt, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(segments):
+            start = format_time_srt(segment.start)
+            end = format_time_srt(segment.end)
+            f.write(f"{i + 1}\n")
+            f.write(f"{start} --> {end}\n")
+            f.write(f"{segment.text.strip()}\n\n")
+            count += 1
+            if count % 100 == 0:
+                print(f"Processed {count} segments...")
+
+    print(f"Transcription complete: {count} segments saved to {output_srt}")
+    return output_srt
 
 
 def parse_srt(srt_path):
@@ -145,6 +176,11 @@ def main():
     )
     parser.add_argument("--cuts-dir", default=None, help="Directory for cuts")
     parser.add_argument("--output", default=None, help="Output file name")
+    parser.add_argument(
+        "--model",
+        default="large-v3-turbo",
+        help="Whisper model (default: large-v3-turbo)",
+    )
 
     args = parser.parse_args()
 
@@ -159,8 +195,13 @@ def main():
     transcribe_dir = os.path.join(workspace, "transcribe_temp")
     cuts_dir = args.cuts_dir or os.path.join(workspace, f"cuts_{base_name}")
 
-    print(f"Transcribing: {input_file}")
-    srt_file = transcribe(input_file, transcribe_dir)
+    existing_srt = glob.glob(os.path.join(transcribe_dir, f"{base_name}*.srt"))
+    if existing_srt:
+        srt_file = existing_srt[0]
+        print(f"Using existing transcription: {srt_file}")
+    else:
+        print(f"Transcribing: {input_file}")
+        srt_file = transcribe(input_file, transcribe_dir, args.model)
 
     print(f"Parsing subtitles: {srt_file}")
     subtitles = parse_srt(srt_file)
